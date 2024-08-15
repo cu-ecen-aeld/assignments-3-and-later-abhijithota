@@ -1,3 +1,9 @@
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+
 #include "systemcalls.h"
 
 /**
@@ -16,6 +22,12 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+
+    if(system(cmd) == -1)
+    {
+        perror("Error running system(cmd)");
+        return false;
+    }
 
     return true;
 }
@@ -61,6 +73,40 @@ bool do_exec(int count, ...)
 
     va_end(args);
 
+    pid_t pid = fork();
+
+    switch (pid)
+    {
+        case 0:
+        {
+            if(execv(command[0], command) == -1)
+            {
+                perror("Error executing execv");
+                exit(EXIT_FAILURE);
+            }
+            break;
+        }
+
+        case -1:
+        {
+            perror("Error forking child process");
+            return false;
+            break;
+        }
+
+        default:
+        {
+            int status;
+            if(waitpid(pid, &status, 0) <= 0)
+            {
+                perror("Error waiting for child to terminate");
+                return false;
+            }
+            return (WEXITSTATUS(status) == EXIT_SUCCESS);
+            break;
+        }
+    }
+
     return true;
 }
 
@@ -94,6 +140,55 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 */
 
     va_end(args);
+
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if(fd < 0)
+    {
+        perror("Error opening file");
+        return false;
+    }
+
+    pid_t pid = fork();
+
+    switch (pid)
+    {
+        case 0:
+        {
+            if (dup2(fd, 1) < 0)
+            {
+                perror("dup2");
+                return false;
+            }
+            close(fd);
+            if(execv(command[0], command) == -1)
+            {
+                perror("Error executing execv");
+                return false;
+            }
+            break;
+        }
+
+        case -1:
+        {
+            perror("Error forking child process");
+            close(fd);
+            return false;
+            break;
+        }
+
+        default:
+        {
+            close(fd);
+            int status;
+            if(waitpid(pid, &status, 0) <= 0)
+            {
+                perror("Error waiting for child to terminate");
+                return false;
+            }
+            break;
+        }
+    }
+
 
     return true;
 }

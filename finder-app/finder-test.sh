@@ -50,14 +50,14 @@ then
 fi
 #echo "Removing the old writer utility and compiling as a native application"
 # Clean any previous build artifacts.
-make clean
+# make clean
 #Compile your writer application using native compilation
-make
+# make
 
 for i in $( seq 1 $NUMFILES)
 do
 # Use your “writer” utility instead of “writer.sh” shell script.
-	./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
+#	./writer "$WRITEDIR/${username}$i.txt" "$WRITESTR"
 done
 
 OUTPUTSTRING=$(./finder.sh "$WRITEDIR" "$WRITESTR")
