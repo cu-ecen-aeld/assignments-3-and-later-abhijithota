@@ -187,20 +187,6 @@ int main(int argc, char *argv[])
     int pthread_return;
     pthread_mutex_init(&output_file_mutex, NULL);
 
-    // Start 10 second time for timestamp
-    pthread_t timer_thread_id;
-    pthread_attr_t attr;
-    struct sched_param sched;
-    pthread_attr_init(&attr);
-    pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
-    sched.sched_priority = sched_get_priority_max(SCHED_FIFO);
-    pthread_attr_setschedparam(&attr, &sched);
-    pthread_return = pthread_create(&timer_thread_id, &attr, timer_thread, NULL);
-    if (pthread_return != 0)
-    {
-        perror("Error in creating timer thread\n");
-    }
-
     // Setup socket
     struct sockaddr_in socket_address;
 
@@ -259,6 +245,20 @@ int main(int argc, char *argv[])
     {
         perror("Error in listen");
         return -1;
+    }
+
+    // Start 10 second time for timestamp
+    pthread_t timer_thread_id;
+    pthread_attr_t attr;
+    struct sched_param sched;
+    pthread_attr_init(&attr);
+    pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+    sched.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    pthread_attr_setschedparam(&attr, &sched);
+    pthread_return = pthread_create(&timer_thread_id, &attr, timer_thread, NULL);
+    if (pthread_return != 0)
+    {
+        perror("Error in creating timer thread\n");
     }
 
     struct thread_data *new_thread_data;
