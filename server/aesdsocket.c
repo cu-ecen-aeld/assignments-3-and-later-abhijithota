@@ -8,9 +8,28 @@
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/queue.h>
+#include <pthread.h>
+
+#define OUTPUT_FILE_PATH "/var/tmp/aesdsocketdata"
+
+char now_buff[100];
+pthread_mutex_t output_file_mutex;
 
 int socket_fd;
 bool is_signaled = false;
+
+struct thread_data
+{
+    pthread_t thread_id;
+    int client_fd;
+    int done;
+    SLIST_ENTRY(thread_data)
+    thread_entries;
+};
+
+SLIST_HEAD(thread_head, thread_data)
+thread_list;
 
 void signal_handler(int signal_number)
 {
@@ -22,13 +41,118 @@ void signal_handler(int signal_number)
     }
 }
 
+void *timer_thread(void *arg)
+{
+    // Open File
+    int out_fd = open(OUTPUT_FILE_PATH, O_CREAT | O_RDWR | O_APPEND, 0644);
+    if (out_fd < 0)
+    {
+        perror("Error in opening data file");
+        return -1;
+    }
+
+    // Run until program received signal
+    while (!is_signaled)
+    {
+        // Get current time
+        time_t now_time = time(NULL);
+        struct tm *now_tm = localtime(&now_time);
+
+        // Format timestamp per RFC 2822 compliance
+        strftime(now_buff, sizeof(now_buff), "timestamp: %a, %d %b %Y %H:%M:%S %z\n", now_tm);
+
+        // Write to file atomically
+        pthread_mutex_lock(&output_file_mutex);
+        write(out_fd, now_buff, strlen(now_buff));
+        pthread_mutex_unlock(&output_file_mutex);
+
+        // Sleep for 10 seconds
+        sleep(10);
+    }
+
+    close(out_fd);
+}
+
+void *server_thread(void *arg)
+{
+    struct thread_data *current_thread_data = (struct thread_data *)arg;
+    int current_client_fd = current_thread_data->client_fd;
+
+    char incoming_buffer[256];
+    int out_fd = open(OUTPUT_FILE_PATH, O_CREAT | O_RDWR | O_APPEND, 0644);
+    if (out_fd < 0)
+    {
+        perror("Error in opening data file");
+        return -1;
+    }
+
+    off_t start_pos = lseek(out_fd, 0, SEEK_CUR);
+    bool is_the_end = false;
+    pthread_mutex_lock(&output_file_mutex);
+    while (!is_the_end && !is_signaled)
+    {
+        memset(incoming_buffer, 0, sizeof(incoming_buffer));
+        int bytes_recv = recv(current_client_fd, incoming_buffer, sizeof(incoming_buffer), 0);
+
+        if (bytes_recv <= 0)
+        {
+            perror("Error in recv");
+        }
+
+        char *newline_ptr = strchr(incoming_buffer, '\n');
+        if (newline_ptr != NULL)
+        {
+            if (write(out_fd, incoming_buffer, newline_ptr - incoming_buffer + 1) < 0)
+            {
+                perror("Error in write with newline");
+            }
+            is_the_end = true;
+        }
+        else
+        {
+            write(out_fd, incoming_buffer, bytes_recv);
+        }
+    }
+
+    lseek(out_fd, start_pos, SEEK_SET);
+    is_the_end = false;
+    while (!is_the_end && !is_signaled)
+    {
+        memset(incoming_buffer, 0, sizeof(incoming_buffer));
+        int read_size = read(out_fd, incoming_buffer, sizeof(incoming_buffer));
+        // printf("Read Size %d\n", read_size);
+
+        if (read_size == -1)
+        {
+            perror("Error in read");
+        }
+        else if (read_size == 0)
+        {
+            is_the_end = true;
+        }
+        else
+        {
+            if (send(current_client_fd, incoming_buffer, read_size, 0) < 0)
+            {
+                perror("Error in send");
+                return -1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&output_file_mutex);
+
+    close(out_fd);
+    current_thread_data->done = 1;
+}
+
 int main(int argc, char *argv[])
 {
     openlog(NULL, 0, LOG_USER);
 
-    if(open("/var/tmp/aesdsocketdata", O_CREAT | O_APPEND | O_RDWR, 0644) > 0) {
-		remove("/var/tmp/aesdsocketdata");
-	}
+    if (open(OUTPUT_FILE_PATH, O_CREAT | O_APPEND | O_RDWR, 0644) > 0)
+    {
+        remove(OUTPUT_FILE_PATH);
+    }
 
     // Check for daemon mode request
     bool is_daemon = false;
@@ -50,6 +174,7 @@ int main(int argc, char *argv[])
     struct sigaction signal_actions;
     signal_actions.sa_handler = signal_handler;
     signal_actions.sa_flags = 0;
+    sigemptyset(&signal_actions.sa_mask);
     if (sigaction(SIGINT, &signal_actions, NULL) == -1)
     {
         perror("Error in registering SIGNINT\n");
@@ -57,6 +182,23 @@ int main(int argc, char *argv[])
     if (sigaction(SIGTERM, &signal_actions, NULL) == -1)
     {
         perror("Error in registering SIGTERM\n");
+    }
+
+    int pthread_return;
+    pthread_mutex_init(&output_file_mutex, NULL);
+
+    // Start 10 second time for timestamp
+    pthread_t timer_thread_id;
+    pthread_attr_t attr;
+    struct sched_param sched;
+    pthread_attr_init(&attr);
+    pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+    sched.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    pthread_attr_setschedparam(&attr, &sched);
+    pthread_return = pthread_create(&timer_thread_id, &attr, timer_thread, NULL);
+    if (pthread_return != 0)
+    {
+        perror("Error in creating timer thread\n");
     }
 
     // Setup socket
@@ -119,7 +261,10 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    char incoming_buffer[256];
+    struct thread_data *new_thread_data;
+    struct thread_data *current_thread_data;
+
+    SLIST_INIT(&thread_list);
 
     while (!is_signaled)
     {
@@ -138,73 +283,48 @@ int main(int argc, char *argv[])
                (unsigned char)client_info.sa_data[4], (unsigned char)client_info.sa_data[5],
                (unsigned short)((unsigned short)(client_info.sa_data[0] << 8) | (unsigned short)client_info.sa_data[1]));
 
-        int out_fd = open("/var/tmp/aesdsocketdata", O_CREAT | O_RDWR | O_APPEND, 0644);
-        if (out_fd < 0)
+        // Create thread info
+        new_thread_data = malloc(sizeof(struct thread_data));
+        new_thread_data->done = 0;
+        new_thread_data->client_fd = client_fd;
+
+        pthread_return = pthread_create(&(new_thread_data->thread_id), NULL, server_thread, (void *)new_thread_data);
+        if (pthread_return != 0)
         {
-            perror("Error in opening data file");
-            return -1;
+            perror("Error in creating server thread with error\n");
         }
+        SLIST_INSERT_HEAD(&thread_list, new_thread_data, thread_entries);
 
-        bool is_the_end = false;
-        while (!is_the_end && !is_signaled)
+        SLIST_FOREACH(current_thread_data, &thread_list, thread_entries)
         {
-            memset(incoming_buffer, 0, sizeof(incoming_buffer));
-            int bytes_recv = recv(client_fd, incoming_buffer, sizeof(incoming_buffer), 0);
-            // printf("Bytes Recvd %d\n", bytes_recv);
-
-            if (bytes_recv <= 0)
+            if (current_thread_data->done == 1)
             {
-                perror("Error in recv");
-            }
-
-            char *newline_ptr = strchr(incoming_buffer, '\n');
-            if (newline_ptr != NULL)
-            {
-                if (write(out_fd, incoming_buffer, newline_ptr - incoming_buffer + 1) < 0)
+                if (pthread_join(current_thread_data->thread_id, NULL) != 0)
                 {
-                    perror("Error in write with newline");
+                    perror("Error in thread join");
                 }
-                is_the_end = true;
-            }
-            else
-            {
-                write(out_fd, incoming_buffer, bytes_recv);
+                current_thread_data->done = -1;
             }
         }
-
-        lseek(out_fd, 0, SEEK_SET);
-        is_the_end = false;
-        while (!is_the_end && !is_signaled)
-        {
-            memset(incoming_buffer, 0, sizeof(incoming_buffer));
-            int read_size = read(out_fd, incoming_buffer, sizeof(incoming_buffer));
-            // printf("Read Size %d\n", read_size);
-
-            if (read_size == -1)
-            {
-                perror("Error in read");
-            }
-            else if (read_size == 0)
-            {
-                is_the_end = true;
-            }
-            else
-            {
-                if (send(client_fd, incoming_buffer, read_size, 0) < 0)
-                {
-                    perror("Error in send");
-                    return -1;
-                }
-            }
-        }
-
-        close(out_fd);
-        close(client_fd);
 
         syslog(LOG_DEBUG, "Closed connection from %u.%u.%u.%u : %u\n",
                (unsigned char)client_info.sa_data[2], (unsigned char)client_info.sa_data[3],
                (unsigned char)client_info.sa_data[4], (unsigned char)client_info.sa_data[5],
                (unsigned short)((unsigned short)(client_info.sa_data[0] << 8) | (unsigned short)client_info.sa_data[1]));
+    }
+
+    while (!SLIST_EMPTY(&thread_list))
+    {
+        current_thread_data = SLIST_FIRST(&thread_list);
+        SLIST_REMOVE_HEAD(&thread_list, thread_entries);
+        free(current_thread_data);
+    }
+
+    SLIST_INIT(&thread_list);
+
+    if (pthread_join(timer_thread_id, NULL) != 0)
+    {
+        perror("Error in thread join for timer thread");
     }
 
     close(socket_fd);
