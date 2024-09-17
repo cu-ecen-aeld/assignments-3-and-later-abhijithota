@@ -29,10 +29,33 @@
 struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
-    /**
-    * TODO: implement per description
-    */
-    return NULL;
+    // Sanity check for parameters
+    if(buffer == NULL)
+        return NULL;
+    if(entry_offset_byte_rtn == NULL)
+        return NULL;
+
+    // Check if buffer is empty, and return null if it is
+    if (!buffer->full && (buffer->out_offs == buffer->in_offs)) {
+        return NULL;
+    }
+
+    int curr_buff_idx = buffer->out_offs;
+    size_t curr_entry_size = buffer->entry[curr_buff_idx].size;
+
+    while(char_offset >= curr_entry_size)
+    {
+        char_offset = char_offset - curr_entry_size;
+        curr_buff_idx = (curr_buff_idx + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        if(curr_buff_idx == buffer->in_offs)
+        {
+            return NULL;
+        }
+        curr_entry_size = buffer->entry[curr_buff_idx].size;
+    }
+
+    *entry_offset_byte_rtn = char_offset;
+    return (&(buffer->entry[curr_buff_idx]));
 }
 
 /**
@@ -44,9 +67,30 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 */
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
-    /**
-    * TODO: implement per description
-    */
+    // Sanity check for parameters
+    if(buffer == NULL)
+        return;
+    if(add_entry == NULL)
+        return;
+
+    // Add the element the current location (for writing)
+    buffer->entry[buffer->in_offs] = *add_entry;
+    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+
+    // Check of buffer was full. If so, we have overritten previous out_offs
+    if(buffer->full)
+    {
+        buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+    else
+    {
+        // If the buffer was not full, check if it's full now
+        if (buffer->in_offs == buffer->out_offs)
+        {
+            buffer->full = true;
+        }
+    }
+
 }
 
 /**
